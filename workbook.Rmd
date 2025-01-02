@@ -1,0 +1,290 @@
+---
+title: "EB Workbook"
+author: "Hugo"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+library(dplyr)
+```
+
+# Loading scrapped data 
+
+```{r}
+# Prior Data
+# See jupyter notebook to see data scraping related code
+data <- read.csv("826SR.csv")
+print(data)
+# Remove first two columns and filter out NA values
+cleaned_data <- data[, c(3:5)] %>% 
+  filter(!is.na(`SuccessRate`))
+
+names(cleaned_data) <- c('PK', 'PKatt','SR')
+
+#Filter out players with less than 5 attempts 
+cleaned_data <- cleaned_data %>%
+  filter(`PKatt` >= 5)
+#Convert 1.0 to 0.9999 to be able to fit a beta distribution
+cleaned_data <- cleaned_data %>%
+  mutate(SR = ifelse(SR == 1.0, 0.9999, SR)) 
+
+cleaned_data <- cleaned_data %>%
+  mutate(SR = ifelse(SR == 0, 0.0001, SR)) 
+
+cleaned_data
+  
+```
+
+
+
+```{r}
+hist(cleaned_data$SR, main = "conversion rate", breaks = 10 )
+```
+
+```{r}
+mu_hat = mean(cleaned_data$SR)
+print(paste0("mu_hat = ", mu_hat))
+n_i = length(cleaned_data$SR)
+print(paste0("n_i = ", n_i))
+sigma_hat2 = var(cleaned_data$SR) - (mu_hat*(1-mu_hat))/n_i
+print(paste0("sigma_hat = ", sigma_hat2))
+
+a0 = mu_hat*((mu_hat*(1-mu_hat))/sigma_hat2 -1)
+print(paste0("a0 = ", a0))
+b0 = (1-mu_hat)*((mu_hat*(1-mu_hat))/sigma_hat2 -1)
+print(paste0("b0 = ", b0))
+
+```
+```{r}
+plot(function(x) dbeta(x, shape1 = a0, shape2 = b0), 
+    from = 0, to = 1, 
+    main = "Estimated Beta Distribution (prior success rate)",
+    ylab = "Density",
+    xlab = "x")
+
+```
+```{r}
+hist(cleaned_data$SR, freq = FALSE, main = "Empirical Bayes prior Beta Distribution",
+     xlab = "Value")
+lines(x <- seq(0, 1, length = 100), 
+      dbeta(x, shape1 = a0, shape2 = b0), 
+      col = "red", lwd = 2)
+legend("topleft", legend = paste("Beta(", round(a0,2), ", ", round(b0,2), ") distribution", sep = ""), 
+       col = "red", lwd = 2)
+```
+The fit of the estimated beta distribution is ok, considering the relatively non regular histogram. The spikes in the histogram can be explained by a bias in the data towards specific success rate values, such as when the number of trials in small (ex: 3/5 = 0.6, 4/5 = 0.8, 5/5, = 1, no in between values). Here the choice of 5 attempts minimum was made follow the choices made in the football website article, but note that the number of data points decreases logarithmically with the minimum number of attempts (see plot in jupyter notebook).
+
+```{r}
+
+#library(MASS)
+#plot(density(cleaned_data$SR), main = "Oberved Data density Distribution")
+
+# Alternative to estimate a0 and b0
+#m <- fitdistr(cleaned_data$SR, "beta",
+              #start = list(shape1 = a0, shape2 = b0))
+
+#alpha0 <- m$estimate[1]
+#beta0 <- m$estimate[2]
+#print(paste0("alpha0 = ", alpha0))
+#print(paste0("beta0 = ", beta0))
+```
+
+
+```{r}
+# Posterior calculations
+
+# Example 1: Hypothetical situation with worst than average players.
+
+library(ggplot2)
+library(coda) # For HPDI calculation
+
+# EB prior parameters
+prior_alpha <- a0
+prior_beta <- b0
+
+# Hypothetical player data, both having 0.6 Conversion Rate
+# Recall league average mu_hat = 0.813
+player_data <- list(
+  A = list(successes = 6, trials = 10),
+  B = list(successes = 30, trials = 50)
+)
+
+# Calculate posterior parameters, credible intervals, and HPDI
+results <- list()
+meanvar <- list()
+for (player in names(player_data)) {
+  successes <- player_data[[player]]$successes
+  trials <- player_data[[player]]$trials
+  fails <- trials - successes
+  # Posterior parameters (From Equation (5) result)
+  posterior_alpha <- prior_alpha + successes
+  posterior_beta <- prior_beta + fails
+  
+  # posterior mean and variance
+  posterior_mean <- (prior_alpha + successes) / (prior_alpha + prior_beta + trials) #Equation (6)
+  posterior_variance <- (prior_alpha + successes)*(prior_beta + fails) / ((prior_alpha + prior_beta + trials)^2 * (prior_alpha + prior_beta + trials + 1)) # Equation (7)
+  
+  # 95% credible interval
+  credible_interval <- qbeta(c(0.025, 0.975), posterior_alpha, posterior_beta)
+  
+  # Simulate posterior
+  simulated_posterior <- rbeta(10000, posterior_alpha, posterior_beta)
+  
+  # 95% HPDI
+  hpdi <- HPDinterval(as.mcmc(simulated_posterior), prob = 0.95)
+  
+  results[[player]] <- list(
+    posterior_alpha = posterior_alpha,
+    posterior_beta = posterior_beta,
+    credible_interval = credible_interval,
+    hpdi = hpdi,
+    simulated_posterior = simulated_posterior
+  )
+  meanvar[[player]] <- list(posterior_mean = posterior_mean, posterior_variance = posterior_variance)
+  
+}
+print(meanvar)
+#Plotting:
+x <- seq(0, 1, length.out = 1000)
+density_data <- data.frame(
+  x = rep(x, times = 2),
+  density = c(
+    dbeta(x, results$A$posterior_alpha, results$A$posterior_beta),
+    dbeta(x, results$B$posterior_alpha, results$B$posterior_beta)
+  ),
+  player = rep(c("A", "B"), each = length(x))
+)
+
+interval_data <- data.frame(
+  player = c("A", "B"),
+  lower_credible = sapply(results, function(r) r$credible_interval[1]),
+  upper_credible = sapply(results, function(r) r$credible_interval[2]),
+  lower_hpdi = sapply(results, function(r) r$hpdi[1]),
+  upper_hpdi = sapply(results, function(r) r$hpdi[2])
+)
+print(interval_data)
+
+
+# Plot-generating code written with the help of chatgpt.com
+
+# Plot the posterior distributions with intervals
+ggplot(density_data, aes(x = x, y = density, color = player)) +
+  geom_line(size = 1) +
+  geom_vline(data = interval_data, aes(xintercept = lower_credible, color = player), linetype = "dashed") +
+  geom_vline(data = interval_data, aes(xintercept = upper_credible, color = player), linetype = "dashed") +
+  geom_vline(data = interval_data, aes(xintercept = lower_hpdi, color = player), linetype = "dotted") +
+  geom_vline(data = interval_data, aes(xintercept = upper_hpdi, color = player), linetype = "dotted") +
+  geom_vline(xintercept = mu_hat, color = "black", linetype = "solid", size = 1, alpha = 0.7) + # League average
+  geom_vline(xintercept = 0.6, color = "purple", linetype = "solid", size = 1, alpha = 0.7) + # Players SR
+  labs(
+    title = "Posterior Distributions with Credible Intervals (dashed) and HPDI (dotted)",
+    x = "Success Rate",
+    y = "Density"
+  ) +
+  scale_color_manual(values = c("A" = "blue", "B" = "red")) +
+  theme_minimal() +
+  theme(legend.position = "bottom") +
+  guides(color = guide_legend(title = "Player"))
+
+
+```
+
+While both players have below average Conversion rate to begin with (purple vetical line), it can be observed that player A with the least amount of attempted penalty kick has his posterior density more easily shifted to the league average (Black vertical line). However, both the credible interval (dashed lines) and the HPDI (dotted lines) are much wider for player A and includes a SR region to the left of Player B, which means that Player B could still have a SR worst than player B. Player B's intervals on the other hand are much tighter, indicating more certainty in the player possible SR.
+
+```{r}
+# Example 2: "Perfect" beginner vs. "Above average" experimented.
+
+# EB prior parameters
+prior_alpha <- a0
+prior_beta <- b0
+
+# Hypothetical player data, 
+# Player A with perfect success rate but low amount of attempts
+# Player B with slightly lower success rate but higher amount of attempts
+# Recall league average mu_hat = 0.813 SR
+player_data <- list(
+  A = list(successes = 2, trials = 2), # 1.0 SR
+  B = list(successes = 85, trials = 100) # 0.85 SR
+)
+
+results <- list()
+meanvar <- list()
+for (player in names(player_data)) {
+  successes <- player_data[[player]]$successes
+  trials <- player_data[[player]]$trials
+  fails <- trials - successes
+  # Posterior parameters
+  posterior_alpha <- prior_alpha + successes
+  posterior_beta <- prior_beta + fails
+  
+   posterior_mean <- (prior_alpha + successes) / (prior_alpha + prior_beta + trials) #Equation (6)
+  posterior_variance <- (prior_alpha + successes)*(prior_beta + fails) / ((prior_alpha + prior_beta + trials)^2 * (prior_alpha + prior_beta + trials+1)) # Equation (7)
+  
+  # 95% credible interval
+  credible_interval <- qbeta(c(0.025, 0.975), posterior_alpha, posterior_beta)
+  
+  # Simulate posterior
+  simulated_posterior <- rbeta(10000, posterior_alpha, posterior_beta)
+  
+  # 95% HPDI
+  hpdi <- HPDinterval(as.mcmc(simulated_posterior), prob = 0.95)
+  
+  results[[player]] <- list(
+    posterior_alpha = posterior_alpha,
+    posterior_beta = posterior_beta,
+    credible_interval = credible_interval,
+    hpdi = hpdi,
+    simulated_posterior = simulated_posterior
+  )
+  meanvar[[player]] <-list(posterior_mean = posterior_mean, posterior_variance = posterior_variance)
+}
+
+print(meanvar)
+#for plotting:
+x <- seq(0, 1, length.out = 1000)
+density_data <- data.frame(
+  x = rep(x, times = 2),
+  density = c(
+    dbeta(x, results$A$posterior_alpha, results$A$posterior_beta),
+    dbeta(x, results$B$posterior_alpha, results$B$posterior_beta)
+  ),
+  player = rep(c("A", "B"), each = length(x))
+)
+
+interval_data <- data.frame(
+  player = c("A", "B"),
+  lower_credible = sapply(results, function(r) r$credible_interval[1]),
+  upper_credible = sapply(results, function(r) r$credible_interval[2]),
+  lower_hpdi = sapply(results, function(r) r$hpdi[1]),
+  upper_hpdi = sapply(results, function(r) r$hpdi[2])
+)
+print(interval_data)
+
+# Plot-generating code written with the help of chatgpt.com
+# Plot the posterior distributions with intervals
+ggplot(density_data, aes(x = x, y = density, color = player)) +
+  geom_line(size = 1) +
+  geom_vline(data = interval_data, aes(xintercept = lower_credible, color = player), linetype = "dashed") +
+  geom_vline(data = interval_data, aes(xintercept = upper_credible, color = player), linetype = "dashed") +
+  geom_vline(data = interval_data, aes(xintercept = lower_hpdi, color = player), linetype = "dotted") +
+  geom_vline(data = interval_data, aes(xintercept = upper_hpdi, color = player), linetype = "dotted") +
+  geom_vline(xintercept = mu_hat, color = "black", linetype = "solid", size = 1, alpha = 0.7) + # League average
+  #geom_vline(xintercept = 0.6, color = "purple", linetype = "solid", size = 1, alpha = 0.7) + # Players SR
+  labs(
+    title = "Posterior Distributions with Credible Intervals (dashed) and HPDI (dotted)",
+    x = "Success Rate",
+    y = "Density"
+  ) +
+  scale_color_manual(values = c("A" = "blue", "B" = "red")) +
+  theme_minimal() +
+  theme(legend.position = "bottom") +
+  guides(color = guide_legend(title = "Player"))
+
+```
+
